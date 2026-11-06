@@ -290,10 +290,13 @@ const main = async () => {
   const index = (await readJson(`${out}/index.json`)) || { days: {} }
   const today = todayNumber()
 
-  // Días por procesar: los de los últimos LOOKBACK_DAYS que no estén cerrados. Ayer se procesa pero queda
-  // 'partial' (aún pueden llegar ventas) y se vuelve a procesar en la siguiente ejecución
+  // Días por procesar: los de los últimos LOOKBACK_DAYS que no estén hechos, sin ayer (aún pueden llegar
+  // ventas). Cada día se descarga una sola vez, ya completo: un día de béisbol gasta casi todas las filas
+  // diarias del plan y no se puede pagar dos veces (en basketball-prices ayer se procesa como 'partial' y se
+  // repite al día siguiente). Del más reciente al más antiguo: el más antiguo está en el límite del plan
+  // (date_from se recorta a lo que permite) y solo se usa para recuperar un día que no se pudo hacer
   const pending = []
-  for (let day = today - LOOKBACK_DAYS; day < today; day++) {
+  for (let day = today - 2; day >= today - LOOKBACK_DAYS; day--) {
     const date = toDate(day)
     if(FORCE || index.days[date] !== 'final') pending.push(date)
   }
@@ -334,7 +337,7 @@ const main = async () => {
     }
 
     mergeDay(files, date, cards, playerNames)
-    index.days[date] = toDayNumber(date) < today - 1 ? 'final' : 'partial'
+    index.days[date] = 'final'
     processed++
     console.log(`${date}: ${sales.length} ventas, ${cards.length} reconocidas (quedan ${rowsRemaining} filas hoy)`)
   }

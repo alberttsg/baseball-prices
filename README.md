@@ -29,6 +29,10 @@ publica el resultado en la rama `gh-pages` (GitHub Pages). El formato de los arc
 
 Si la clave es la misma que la de `basketball-prices`, las filas diarias del plan se reparten entre los dos.
 
+A diferencia de `basketball-prices`, cada día se procesa una sola vez y cuando ya está cerrado (de anteayer
+hacia atrás): un día de béisbol gasta casi todas las filas diarias del plan. Los precios llegan con dos días de
+retraso.
+
 ## Probar en local
 
 ```
