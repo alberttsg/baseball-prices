@@ -1,0 +1,395 @@
+// Precios de cartas de béisbol a partir de las ventas de TheCardAPI, publicados como JSON estáticos en GitHub
+// Pages para la app. Se ejecuta cada día (.github/workflows/update-prices.yml):
+//   THECARDAPI_KEY=... node build.mjs <carpeta de salida>
+// La carpeta de salida tiene lo ya publicado: el histórico de cada carta se completa con los días nuevos.
+// Para saber cuántas filas del plan gasta un día (sin procesar nada; gasta una fila por búsqueda):
+//   THECARDAPI_KEY=... node build.mjs --estimate [YYYY-MM-DD]
+//
+// Es el mismo proceso que basketball-prices. Diferencias: se descartan las ventas que la API marca como de
+// otro deporte, se puede poner un precio mínimo (MIN_PRICE) para gastar menos filas del plan y, antes de
+// procesar un día, se cuenta cuántas filas tiene para no empezarlo si no caben en lo que queda del plan.
+//
+// Las ventas se buscan por nombre de jugador (data/players.json) y sus títulos se leen con cardParser.js, el
+// mismo archivo que usa la app para leer el texto de la foto, así que las claves coinciden.
+// No se publican las ventas sueltas, solo el resumen de cada día por carta (mediana, nº de ventas, mín. y máx.).
+//
+// Archivos publicados:
+//   index.json         { updated, epoch, days: { 'YYYY-MM-DD': 'final' | 'partial' }, players: { slug: nº de cartas },
+//                      teams: { slug: equipo } }
+//   players.json       [[nombre, slug, activo], ...] (todos los jugadores, para reconocer el nombre en la app)
+//   rules.json         sets, parallels, equipos, alias y palabras excluidas (para cardParser.js en la app)
+//   trends.json        { updated, epoch, lists: { rising7, falling7, rising30, falling30, top } }, cada una
+//                      [{ slug, name, team, key, grade, year, set, number, parallel, printRun, auto, rookie,
+//                      image, price, from, change }] (precios en céntimos, change en %)
+//   p/<slug>.json      { name, slug, team, epoch, cards: [{ year, set, number, parallel, printRun, auto,
+//                        memorabilia, rookie, image, grades: { 'Raw' | 'PSA 10' | ...: { price, low, high, sales,
+//                        lastSale, history: [[día, mediana, ventas, mín, máx], ...] } } }] }
+// Precios en céntimos de USD. El día es el nº de días desde epoch. price/low/high/sales son de los últimos
+// SUMMARY_DAYS días; si la carta no se ha vendido en ese tiempo, price es la mediana de su última venta.
+
+import { readFile, writeFile, readdir, mkdir, rm, appendFile } from 'node:fs/promises'
+import { createParser, variantKey } from './cardParser.js'
+
+const API_URL = 'https://www.thecardapi.com/api/v1/market/sales'
+const API_KEY = process.env.THECARDAPI_KEY
+// Días hacia atrás que permite consultar el plan (gratis: 3, Starter: 14)
+const LOOKBACK_DAYS = Number(process.env.LOOKBACK_DAYS || 3)
+const FORCE = !!process.env.FORCE
+
+const EPOCH = '2026-01-01'
+const HISTORY_DAYS = 180
+const SUMMARY_DAYS = 30
+// Nombres por búsqueda: la API acepta "(nombre, nombre, ...)" como O. Con 700 aún responde, se deja margen
+const NAMES_PER_QUERY = 600
+const PAGE_LIMIT = 1000
+// Ventas de menos de este precio (USD) no se piden: el béisbol tiene muchas ventas de cartas baratas y el plan
+// limita las filas por día. Variable del repositorio MIN_PRICE (vacía: todas)
+const MIN_PRICE = Number(process.env.MIN_PRICE) || 0
+const SPORT = 'Baseball'
+
+const DAY_MS = 24 * 3600 * 1000
+const toDayNumber = (date) => Math.round((new Date(`${date}T00:00:00Z`) - new Date(`${EPOCH}T00:00:00Z`)) / DAY_MS)
+const toDate = (dayNumber) => new Date(new Date(`${EPOCH}T00:00:00Z`).getTime() + dayNumber * DAY_MS).toISOString().slice(0, 10)
+const todayNumber = () => toDayNumber(new Date().toISOString().slice(0, 10))
+const cents = (value) => Math.round(value * 100)
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
+const median = (values) => {
+  const sorted = [...values].sort((a, b) => a - b)
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? sorted[middle] : Math.round((sorted[middle - 1] + sorted[middle]) / 2)
+}
+
+const readJson = async (path) => {
+  try {
+    return JSON.parse(await readFile(path, 'utf8'))
+  } catch (e) {
+    return null
+  }
+}
+
+// Filas que quedan hoy en el plan y filas por día del plan (de la última respuesta)
+let rowsRemaining = Infinity
+let rowsLimit = Infinity
+
+class BudgetError extends Error {}
+
+const request = async (params) => {
+  const url = `${API_URL}?${new URLSearchParams(params)}`
+
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(url, { headers: { 'x-market-api-key': API_KEY } })
+    const remaining = res.headers.get('x-ratelimit-remaining')
+    if(remaining !== null) rowsRemaining = Number(remaining)
+    const limit = res.headers.get('x-ratelimit-limit')
+    if(limit !== null) rowsLimit = Number(limit)
+
+    if(res.ok) return res.json()
+    if(res.status === 429 && rowsRemaining === 0) throw new BudgetError('Sin filas disponibles hoy')
+    if(attempt >= 4 || (res.status < 500 && res.status !== 429)) throw new Error(`${res.status} ${await res.text()}`)
+    await sleep(2000 * attempt)
+  }
+}
+
+const queryParams = (query, date) => ({
+  q: query,
+  category: 'sports',
+  date_from: date,
+  date_to: date,
+  ...(MIN_PRICE ? { price_min: MIN_PRICE } : {}),
+})
+
+// Filas que tiene un día (una fila del plan por búsqueda)
+const countDay = async (date, queries) => {
+  let total = 0
+  for (const query of queries) {
+    const page = await request({ ...queryParams(query, date), limit: 1 })
+    total += page.pagination?.total || 0
+    await sleep(250)
+  }
+  return total
+}
+
+// Todas las ventas de un día de los jugadores de la lista
+const fetchDay = async (date, queries) => {
+  const sales = new Map()
+
+  for (const query of queries) {
+    let cursor = null
+    do {
+      const params = { ...queryParams(query, date), limit: PAGE_LIMIT }
+      if(cursor) params.cursor = cursor
+      const page = await request(params)
+      for (const sale of page.data || []) sales.set(sale.id, sale)
+      cursor = page.data?.length === PAGE_LIMIT ? page.pagination?.next_cursor : null
+      await sleep(250)
+    } while (cursor)
+  }
+
+  return [...sales.values()]
+}
+
+// Búsquedas "(nombre, nombre, ...)" con todos los jugadores y alias
+const buildQueries = (players, rules) => {
+  const terms = [...players.map(([name]) => name), ...Object.keys(rules.aliases)]
+    .map(name => name.replace(/[(),"]/g, ' ').trim())
+    .filter(Boolean)
+
+  const queries = []
+  for (let i = 0; i < terms.length; i += NAMES_PER_QUERY) queries.push(`(${terms.slice(i, i + NAMES_PER_QUERY).join(',')})`)
+  return queries
+}
+
+// Resumen de los últimos SUMMARY_DAYS días: mediana de las medianas diarias ponderada por nº de ventas
+const summarize = (history, today) => {
+  const recent = history.filter(([day]) => day > today - SUMMARY_DAYS)
+  const last = history[history.length - 1]
+
+  if(!recent.length) return { price: last[1], low: last[3], high: last[4], sales: 0, lastSale: toDate(last[0]) }
+
+  const weighted = recent.flatMap(([, value, count]) => Array(Math.min(count, 50)).fill(value))
+  return {
+    price: median(weighted),
+    low: Math.min(...recent.map(e => e[3])),
+    high: Math.max(...recent.map(e => e[4])),
+    sales: recent.reduce((sum, e) => sum + e[2], 0),
+    lastSale: toDate(last[0]),
+  }
+}
+
+// Tendencias del mercado (Explore > Trending): las cartas que más suben y bajan en 7 y 30 días
+// (precio del último día con ventas frente al de antes del periodo) y las más caras (mediana de 30 días, con al
+// menos TRENDS_MIN_SALES ventas). Solo cartas de al menos TRENDS_MIN_CENTS
+const TRENDS_SIZE = 50
+const TRENDS_MIN_CENTS = 500
+const TRENDS_MIN_SALES = 2
+
+const buildTrends = (files, today) => {
+  const items = []
+
+  for (const file of files.values()) {
+    for (const card of file.cards) {
+      for (const [grade, entry] of Object.entries(card.grades)) {
+        const { key, year, set, number, parallel, printRun, auto, rookie, image } = card
+        items.push({ slug: file.slug, name: file.name, team: file.team, key, grade, year, set, number, parallel, printRun, auto, rookie, image, entry })
+      }
+    }
+  }
+
+  const movers = (days) => items.map(({ entry, ...item }) => {
+    const last = entry.history[entry.history.length - 1]
+    const before = [...entry.history].reverse().find(e => e[0] <= today - days)
+    if(!last || !before || before === last || before[1] < TRENDS_MIN_CENTS || last[1] < TRENDS_MIN_CENTS) return null
+    return { ...item, price: last[1], from: before[1], change: Math.round((last[1] - before[1]) / before[1] * 1000) / 10 }
+  }).filter(e => e && Math.abs(e.change) >= 1)
+
+  const top = items
+    .filter(({ entry }) => entry.price >= TRENDS_MIN_CENTS && entry.sales >= TRENDS_MIN_SALES)
+    .map(({ entry, ...item }) => ({ ...item, price: entry.price, from: null, change: null }))
+    .sort((a, b) => b.price - a.price)
+    .slice(0, TRENDS_SIZE)
+
+  const lists = { top }
+  for (const days of [7, 30]) {
+    const list = movers(days)
+    lists[`rising${days}`] = list.filter(e => e.change > 0).sort((a, b) => b.change - a.change).slice(0, TRENDS_SIZE)
+    lists[`falling${days}`] = list.filter(e => e.change < 0).sort((a, b) => a.change - b.change).slice(0, TRENDS_SIZE)
+  }
+
+  return { updated: new Date().toISOString(), epoch: EPOCH, lists }
+}
+
+const loadPlayerFiles = async (out) => {
+  const files = new Map()
+  let names = []
+  try {
+    names = await readdir(`${out}/p`)
+  } catch (e) {}
+
+  for (const name of names) {
+    const data = await readJson(`${out}/p/${name}`)
+    if(data) files.set(data.slug, data)
+  }
+  return files
+}
+
+// Añade las ventas de un día a las cartas de cada jugador (sustituye lo que hubiera de ese día)
+const mergeDay = (files, date, cards, playerNames) => {
+  const day = toDayNumber(date)
+  // slug -> clave de variante -> { card, grades: { grado: [precios] } }
+  const byPlayer = new Map()
+
+  for (const card of cards) {
+    if(!byPlayer.has(card.player)) byPlayer.set(card.player, new Map())
+    const variants = byPlayer.get(card.player)
+    const key = variantKey(card)
+    if(!variants.has(key)) variants.set(key, { card, grades: {}, teams: [] })
+    const variant = variants.get(key)
+    ;(variant.grades[card.grade] ||= []).push(card.price)
+    if(card.image && !variant.image) variant.image = card.image
+    if(card.team) variant.teams.push(card.team)
+  }
+
+  // Quitar ese día de todas las cartas (por si se vuelve a procesar)
+  for (const file of files.values()) {
+    for (const card of file.cards) {
+      for (const grade of Object.values(card.grades)) grade.history = grade.history.filter(e => e[0] !== day)
+    }
+  }
+
+  for (const [slug, variants] of byPlayer) {
+    if(!files.has(slug)) files.set(slug, { name: playerNames.get(slug), slug, team: null, epoch: EPOCH, cards: [] })
+    const file = files.get(slug)
+    const teams = []
+
+    for (const [key, variant] of variants) {
+      let card = file.cards.find(e => e.key === key)
+      if(!card){
+        const { year, set, number, parallel, printRun, auto, memorabilia } = variant.card
+        card = { key, year, set, number, parallel, printRun, auto, memorabilia, rookie: false, image: null, grades: {} }
+        file.cards.push(card)
+      }
+      card.rookie = card.rookie || variant.card.rookie
+      card.memorabilia = card.memorabilia || variant.card.memorabilia
+      if(variant.image) card.image = variant.image
+      teams.push(...variant.teams)
+
+      for (const [grade, prices] of Object.entries(variant.grades)) {
+        const entry = card.grades[grade] ||= { history: [] }
+        entry.history.push([day, median(prices), prices.length, Math.min(...prices), Math.max(...prices)])
+        entry.history.sort((a, b) => a[0] - b[0])
+      }
+    }
+
+    // El equipo que más aparece en las ventas del día
+    if(teams.length){
+      const counts = teams.reduce((acc, team) => ({ ...acc, [team]: (acc[team] || 0) + 1 }), {})
+      file.team = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0]
+    }
+  }
+}
+
+const estimate = async (date, queries) => {
+  const total = await countDay(date, queries)
+  console.log(`${date}: ${total} ventas${MIN_PRICE ? ` de ${MIN_PRICE} USD o más` : ''} en ${queries.length} búsquedas`)
+  console.log(`Plan: ${rowsLimit} filas al día, quedan ${rowsRemaining} hoy`)
+}
+
+const main = async () => {
+  const out = process.argv[2]
+  if(!out) throw new Error('Uso: node build.mjs <carpeta de salida> | --estimate [YYYY-MM-DD]')
+  if(!API_KEY) throw new Error('Falta THECARDAPI_KEY')
+
+  const players = await readJson('data/players.json')
+  const rules = await readJson('data/rules.json')
+
+  if(out === '--estimate') return estimate(process.argv[3] || toDate(todayNumber() - 1), buildQueries(players, rules))
+  const { parse } = createParser({ players, rules })
+  const playerNames = new Map(players.map(([name, slug]) => [slug, name]))
+
+  const index = (await readJson(`${out}/index.json`)) || { days: {} }
+  const today = todayNumber()
+
+  // Días por procesar: los de los últimos LOOKBACK_DAYS que no estén cerrados. Ayer se procesa pero queda
+  // 'partial' (aún pueden llegar ventas) y se vuelve a procesar en la siguiente ejecución
+  const pending = []
+  for (let day = today - LOOKBACK_DAYS; day < today; day++) {
+    const date = toDate(day)
+    if(FORCE || index.days[date] !== 'final') pending.push(date)
+  }
+
+  const files = await loadPlayerFiles(out)
+  const queries = buildQueries(players, rules)
+  let processed = 0
+
+  for (const date of pending) {
+    let sales
+    try {
+      // Un día que no cabe en lo que queda del plan no se empieza (quedaría a medias)
+      const total = await countDay(date, queries)
+      if(total + queries.length > rowsRemaining){
+        const reason = total > rowsLimit
+          ? `el día tiene ${total} ventas y el plan da ${rowsLimit} filas al día: sube MIN_PRICE o el plan`
+          : `necesita ${total} filas y quedan ${rowsRemaining} hoy: se procesará en la siguiente ejecución`
+        console.log(`::warning::${date}: ${reason}`)
+        break
+      }
+      sales = await fetchDay(date, queries)
+    } catch (e) {
+      // Un día a medias no se guarda: se vuelve a intentar entero en la siguiente ejecución
+      console.log(`::warning::${date}: ${e.message}`)
+      if(e instanceof BudgetError) break
+      continue
+    }
+
+    const cards = []
+    for (const sale of sales) {
+      // Mismo nombre que un jugador de otro deporte (la búsqueda es por nombre)
+      if(sale.sport && sale.sport !== SPORT) continue
+      const price = sale.price_usd ?? (sale.currency === 'USD' ? sale.price : null)
+      if(!price || price <= 0) continue
+      const card = parse(sale.title, { grader: sale.grader, grade: sale.grade })
+      if(!card || (!card.set && !card.number)) continue
+      cards.push({ ...card, price: cents(price), image: sale.thumbnail_url || null })
+    }
+
+    mergeDay(files, date, cards, playerNames)
+    index.days[date] = toDayNumber(date) < today - 1 ? 'final' : 'partial'
+    processed++
+    console.log(`${date}: ${sales.length} ventas, ${cards.length} reconocidas (quedan ${rowsRemaining} filas hoy)`)
+  }
+
+  // Sin días nuevos no hace falta publicar, salvo que falte algún archivo (uno nuevo del feed, como trends.json)
+  const complete = (await readJson(`${out}/trends.json`)) && index.teams
+  if(!processed && !FORCE && complete){
+    console.log('Sin días nuevos')
+    return
+  }
+
+  // Resúmenes (cambian cada día aunque no haya ventas nuevas: la ventana de SUMMARY_DAYS avanza)
+  await rm(`${out}/p`, { recursive: true, force: true })
+  await mkdir(`${out}/p`, { recursive: true })
+  index.players = {}
+  index.teams = {}
+
+  for (const file of files.values()) {
+    for (const card of file.cards) {
+      for (const [grade, entry] of Object.entries(card.grades)) {
+        entry.history = entry.history.filter(e => e[0] > today - HISTORY_DAYS)
+        if(!entry.history.length){
+          delete card.grades[grade]
+          continue
+        }
+        Object.assign(entry, summarize(entry.history, today))
+      }
+    }
+    file.cards = file.cards.filter(card => Object.keys(card.grades).length)
+    if(!file.cards.length) continue
+
+    const cardSales = (card) => Object.values(card.grades).reduce((sum, e) => sum + e.sales, 0)
+    file.cards.sort((a, b) => cardSales(b) - cardSales(a))
+
+    await writeFile(`${out}/p/${file.slug}.json`, JSON.stringify(file))
+    index.players[file.slug] = file.cards.length
+    if(file.team) index.teams[file.slug] = file.team
+  }
+
+  for (const date of Object.keys(index.days)) {
+    if(toDayNumber(date) <= today - HISTORY_DAYS) delete index.days[date]
+  }
+  index.updated = new Date().toISOString()
+  index.epoch = EPOCH
+
+  await writeFile(`${out}/index.json`, JSON.stringify(index))
+  await writeFile(`${out}/players.json`, JSON.stringify(players))
+  await writeFile(`${out}/rules.json`, JSON.stringify(rules))
+  await writeFile(`${out}/trends.json`, JSON.stringify(buildTrends(files, today)))
+
+  if(process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, 'changed=true\n')
+  console.log(`${Object.keys(index.players).length} jugadores con precios`)
+}
+
+main().catch(e => {
+  console.error(e)
+  process.exit(1)
+})
