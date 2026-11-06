@@ -326,7 +326,11 @@ const main = async () => {
     }
 
     const cards = []
+    // Deporte que pone la API en las ventas (en el log, para ver si se puede filtrar solo por él)
+    const sports = {}
     for (const sale of sales) {
+      const sport = sale.sport || '(vacío)'
+      sports[sport] = (sports[sport] || 0) + 1
       // Mismo nombre que un jugador de otro deporte (la búsqueda es por nombre)
       if(sale.sport && sale.sport !== SPORT) continue
       const price = sale.price_usd ?? (sale.currency === 'USD' ? sale.price : null)
@@ -340,6 +344,7 @@ const main = async () => {
     index.days[date] = 'final'
     processed++
     console.log(`${date}: ${sales.length} ventas, ${cards.length} reconocidas (quedan ${rowsRemaining} filas hoy)`)
+    console.log(`::notice::${date}: ${sales.length} ventas, ${cards.length} reconocidas. Deporte: ${Object.entries(sports).sort((a, b) => b[1] - a[1]).map(([sport, count]) => `${sport} ${count}`).join(', ')}`)
   }
 
   // Sin días nuevos no hace falta publicar, salvo que falte algún archivo (uno nuevo del feed, como trends.json)

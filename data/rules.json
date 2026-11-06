@@ -175,6 +175,14 @@
     "lot", "lots", "you pick", "pick your", "choose", "complete set", "team set", "hobby box", "blaster",
     "packs", "wax pack", "sealed pack", "box break", "case break", "random", "digital", "reprint", "custom", "proxy",
     "photograph", "signed photo", "8x10", "11x14", "16x20", "poster", "bobblehead", "funko", "ticket", "stub",
-    "signed ball", "signed baseball", "autographed baseball", "signed bat", "mini helmet", "jersey only"
+    "signed ball", "signed baseball", "autographed baseball", "signed bat", "mini helmet", "jersey only",
+    "qb", "quarterback", "touchdown", "bills", "chiefs", "cowboys", "eagles", "packers", "steelers", "ravens",
+    "bengals", "texans", "colts", "titans", "jaguars", "broncos", "raiders", "chargers", "dolphins", "patriots",
+    "lions", "bears", "vikings", "saints", "falcons", "buccaneers", "seahawks", "49ers", "commanders",
+    "redskins", "lakers", "celtics", "warriors", "knicks", "bulls", "bucks", "spurs", "clippers", "mavericks",
+    "nuggets", "timberwolves", "pelicans", "grizzlies", "trail blazers", "76ers", "sixers", "raptors",
+    "cavaliers", "pistons", "pacers", "hornets", "wizards", "maple leafs", "canadiens", "bruins", "blackhawks",
+    "penguins", "red wings", "oilers", "flyers", "canucks", "sabres", "islanders", "avalanche", "golden knights",
+    "kraken", "predators", "blue jackets"
   ]
 }
