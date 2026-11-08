@@ -34,6 +34,11 @@ A diferencia de `basketball-prices`, cada día se procesa una sola vez y cuando 
 hacia atrás): un día de béisbol gasta casi todas las filas diarias del plan. Los precios llegan con dos días de
 retraso.
 
+Las ventas en bruto de los últimos 60 días se guardan en la caché de Actions (`raw/`, privada, no se publica).
+Cuando cambian `cardParser.js` o las listas de `data/`, la siguiente ejecución vuelve a leer esos días sin gastar
+filas del plan. En cada ejecución, las anotaciones del log dicen por qué se han descartado las ventas no
+reconocidas (otro deporte, palabra excluida, sin jugador, sin set ni número), con ejemplos de títulos.
+
 ## Probar en local
 
 ```

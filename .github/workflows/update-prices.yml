@@ -53,6 +53,16 @@ jobs:
             mkdir public
           fi
 
+      # Ventas en bruto de los últimos días (build.mjs, RAW_DIR): no se publican; sirven para volver a leer los
+      # días ya procesados cuando mejora el parser, sin gastar filas del plan. Se guarda una copia por ejecución
+      # y se recupera la más reciente
+      - name: Raw sales cache
+        uses: actions/cache@v4
+        with:
+          path: raw
+          key: raw-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: raw-
+
       - name: Build prices
         id: build
         run: node build.mjs public

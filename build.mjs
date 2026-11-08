@@ -12,6 +12,8 @@
 // Las ventas se buscan por nombre de jugador (data/players.json) y sus títulos se leen con cardParser.js, el
 // mismo archivo que usa la app para leer el texto de la foto, así que las claves coinciden.
 // No se publican las ventas sueltas, solo el resumen de cada día por carta (mediana, nº de ventas, mín. y máx.).
+// Las ventas en bruto se guardan en raw/ (caché de Actions, privada) para volver a leer los días cuando cambia
+// el parser. En el log sale por qué se descartan las ventas no reconocidas, con ejemplos.
 //
 // Archivos publicados:
 //   index.json         { updated, epoch, days: { 'YYYY-MM-DD': 'final' | 'partial' }, players: { slug: nº de cartas },
@@ -28,7 +30,8 @@
 // SUMMARY_DAYS días; si la carta no se ha vendido en ese tiempo, price es la mediana de su última venta.
 
 import { readFile, writeFile, readdir, mkdir, rm, appendFile } from 'node:fs/promises'
-import { createParser, variantKey } from './cardParser.js'
+import { createHash } from 'node:crypto'
+import { createParser, variantKey, normalizeText } from './cardParser.js'
 
 const API_URL = 'https://www.thecardapi.com/api/v1/market/sales'
 const API_KEY = process.env.THECARDAPI_KEY
@@ -51,6 +54,10 @@ const PRICE_FLOORS = [0, 1, 2, 3, 5, 8, 12, 20, 40].filter(floor => floor >= MIN
 // Precio mínimo de los días procesados antes de guardarlo en index.json (MIN_PRICE fijo de entonces)
 const LEGACY_MIN_PRICE = 8
 const SPORT = 'Baseball'
+// Ventas en bruto de cada día (solo lo que lee el parser), en la caché de Actions (privada, no se publica):
+// cuando cambian cardParser.js o las listas, los días guardados se vuelven a leer sin gastar filas del plan
+const RAW_DIR = 'raw'
+const RAW_DAYS = 60
 
 const DAY_MS = 24 * 3600 * 1000
 const toDayNumber = (date) => Math.round((new Date(`${date}T00:00:00Z`) - new Date(`${EPOCH}T00:00:00Z`)) / DAY_MS)
@@ -274,6 +281,56 @@ const mergeDay = (files, date, cards, playerNames) => {
   }
 }
 
+// Lo que se guarda de cada venta en raw/ (lo que necesita readSales)
+const rawSale = (sale) => ({
+  title: sale.title,
+  price: sale.price_usd ?? (sale.currency === 'USD' ? sale.price : null),
+  grader: sale.grader || null,
+  grade: sale.grade || null,
+  sport: sale.sport || null,
+  image: sale.thumbnail_url || null,
+})
+
+const REJECT_SAMPLES = 15
+
+// Cartas reconocidas en las ventas (en formato rawSale) y por qué se descartan las demás (para el log)
+const readSales = (sales, parse, excluded) => {
+  const cards = []
+  const sports = {}
+  const rejected = { otherSport: 0, noPrice: 0, excluded: {}, noPlayer: [], noSetOrNumber: [] }
+  let excludedCount = 0
+  for (const sale of sales) {
+    const sport = sale.sport || '(vacío)'
+    sports[sport] = (sports[sport] || 0) + 1
+    // Mismo nombre que un jugador de otro deporte (la búsqueda es por nombre)
+    if(sale.sport && sale.sport !== SPORT){ rejected.otherSport++; continue }
+    if(!sale.price || sale.price <= 0){ rejected.noPrice++; continue }
+    const card = parse(sale.title, { grader: sale.grader, grade: sale.grade })
+    if(!card){
+      const text = normalizeText(sale.title)
+      const word = excluded.find(w => text.includes(w))
+      if(word){
+        rejected.excluded[word.trim()] = (rejected.excluded[word.trim()] || 0) + 1
+        excludedCount++
+      } else rejected.noPlayer.push(sale.title)
+      continue
+    }
+    if(!card.set && !card.number){ rejected.noSetOrNumber.push(sale.title); continue }
+    cards.push({ ...card, price: cents(sale.price), image: sale.image })
+  }
+  rejected.excludedCount = excludedCount
+  return { cards, sports, rejected }
+}
+
+// Resumen de los descartes de un día, con ejemplos (anotación ::notice:: del log, se ve en la ejecución)
+const rejectedNotice = (date, { otherSport, noPrice, excluded, excludedCount, noPlayer, noSetOrNumber }) => {
+  const sample = (titles) => titles.slice(0, REJECT_SAMPLES).map(t => String(t).slice(0, 90).replace(/%/g, '%25').replace(/[\r\n]+/g, ' ')).join(' ¦ ')
+  const words = Object.entries(excluded).sort((a, b) => b[1] - a[1]).slice(0, 25).map(([w, n]) => `${w} ${n}`).join(', ')
+  return `::notice::${date} descartadas: otro deporte ${otherSport}, sin precio ${noPrice}, palabra excluida ${excludedCount} (${words})` +
+    ` %0A· sin jugador ${noPlayer.length}: ${sample(noPlayer)}` +
+    ` %0A· sin set ni número ${noSetOrNumber.length}: ${sample(noSetOrNumber)}`
+}
+
 // Ventas del día con varios precios mínimos (cada uno gasta una fila por búsqueda)
 const estimate = async (date, queries) => {
   for (const floor of PRICE_FLOORS.slice(0, 5)) {
@@ -292,6 +349,11 @@ const main = async () => {
 
   if(out === '--estimate') return estimate(process.argv[3] || toDate(todayNumber() - 1), buildQueries(players, rules))
   const { parse } = createParser({ players, rules })
+  const excluded = rules.excluded.map(word => normalizeText(word))
+  // Versión del parser y sus listas: si cambia, se vuelven a leer los días guardados en raw/
+  const parserVersion = createHash('sha1').update(await readFile('cardParser.js')).update(JSON.stringify(rules)).update(JSON.stringify(players)).digest('hex').slice(0, 12)
+  // Días leídos en esta ejecución (no hace falta volver a leerlos)
+  const readNow = new Set()
   const playerNames = new Map(players.map(([name, slug]) => [slug, name]))
 
   const index = (await readJson(`${out}/index.json`)) || { days: {} }
@@ -350,20 +412,12 @@ const main = async () => {
       continue
     }
 
-    const cards = []
-    // Deporte que pone la API en las ventas (en el log, para ver si se puede filtrar solo por él)
-    const sports = {}
-    for (const sale of sales) {
-      const sport = sale.sport || '(vacío)'
-      sports[sport] = (sports[sport] || 0) + 1
-      // Mismo nombre que un jugador de otro deporte (la búsqueda es por nombre)
-      if(sale.sport && sale.sport !== SPORT) continue
-      const price = sale.price_usd ?? (sale.currency === 'USD' ? sale.price : null)
-      if(!price || price <= 0) continue
-      const card = parse(sale.title, { grader: sale.grader, grade: sale.grade })
-      if(!card || (!card.set && !card.number)) continue
-      cards.push({ ...card, price: cents(price), image: sale.thumbnail_url || null })
-    }
+    const raw = sales.map(rawSale)
+    await mkdir(RAW_DIR, { recursive: true })
+    await writeFile(`${RAW_DIR}/${date}.json`, JSON.stringify(raw))
+    // sports: deporte que pone la API en las ventas (en el log, para ver si se puede filtrar solo por él)
+    const { cards, sports, rejected } = readSales(raw, parse, excluded)
+    readNow.add(date)
 
     mergeDay(files, date, cards, playerNames)
     index.days[date] = 'final'
@@ -372,11 +426,40 @@ const main = async () => {
     processed++
     console.log(`${date}: ${sales.length} ventas desde ${minPrice} USD, ${cards.length} reconocidas (quedan ${rowsRemaining} filas hoy)`)
     console.log(`::notice::${date}: ${sales.length} ventas desde ${minPrice} USD, ${cards.length} reconocidas. Deporte: ${Object.entries(sports).sort((a, b) => b[1] - a[1]).map(([sport, count]) => `${sport} ${count}`).join(', ')}`)
+    console.log(rejectedNotice(date, rejected))
   }
+
+  // Si ha cambiado el parser (cardParser.js, rules.json o players.json), los días guardados en raw/ se vuelven a
+  // leer: las mejoras llegan también a los días ya procesados sin gastar filas
+  let reread = 0
+  if(index.parser !== parserVersion){
+    let rawFiles = []
+    try {
+      rawFiles = (await readdir(RAW_DIR)).filter(name => name.endsWith('.json'))
+    } catch (e) {}
+    for (const name of rawFiles.sort()) {
+      const date = name.slice(0, -5)
+      if(readNow.has(date) || index.days[date] !== 'final') continue
+      const raw = await readJson(`${RAW_DIR}/${name}`)
+      if(!raw) continue
+      const { cards } = readSales(raw, parse, excluded)
+      mergeDay(files, date, cards, playerNames)
+      reread++
+      console.log(`${date}: releído con el parser nuevo, ${raw.length} ventas, ${cards.length} reconocidas`)
+    }
+    index.parser = parserVersion
+  }
+
+  // Las ventas en bruto solo hacen falta RAW_DAYS días
+  try {
+    for (const name of await readdir(RAW_DIR)) {
+      if(toDayNumber(name.slice(0, 10)) <= today - RAW_DAYS) await rm(`${RAW_DIR}/${name}`)
+    }
+  } catch (e) {}
 
   // Sin días nuevos no hace falta publicar, salvo que falte algún archivo (uno nuevo del feed, como trends.json)
   const complete = (await readJson(`${out}/trends.json`)) && index.teams
-  if(!processed && !FORCE && complete){
+  if(!processed && !reread && !FORCE && complete){
     console.log('Sin días nuevos')
     return
   }

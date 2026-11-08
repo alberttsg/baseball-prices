@@ -1,7 +1,7 @@
 // Lee los datos de una carta de béisbol en un texto: el título de una venta (build.mjs) o el texto que el OCR
 // lee en la foto de la carta (la app). Es el mismo archivo en los dos sitios para que las claves coincidan:
 // si se cambia aquí, hay que copiarlo a la app (baseball/Components/Prices/cardParser.js).
-// Salvo CODE_PATTERN y UPDATE_NUMBER_PATTERN, es el mismo que el de basketball-prices.
+// Salvo CODE_PATTERN, UPDATE_NUMBER_PATTERN y WORD_NUMBER_PATTERN, es el mismo que el de basketball-prices.
 // No tiene dependencias: las listas de jugadores, sets, parallels y equipos llegan como datos (players.json y
 // rules.json del feed), así que se pueden ampliar sin publicar una versión nueva de la app.
 
@@ -29,6 +29,8 @@ const NUMBER_PATTERN = /#\s*([a-z0-9]{1,6}(?:-[a-z0-9]{1,6})?)(?![a-z0-9])(?!\s*
 // Sin "#": códigos con letras y guion (BCP-100, BDC-1, TC-15) y los números de Topps Update (US175, USC50)
 const CODE_PATTERN = /(?:^|[^a-z0-9#\/])(?!(?:psa|bgs|sgc|cgc)-)([a-z]{1,5}-[a-z]{0,3}\d{1,4}[a-z]?)(?![a-z0-9])/
 const UPDATE_NUMBER_PATTERN = /(?:^|[^a-z0-9])(usc?\d{1,3})(?![a-z0-9])/
+// "No. 27", "Card 27", "Card #27" (sin "#" pegado al número; no la tirada /99)
+const WORD_NUMBER_PATTERN = /(?:^|[^a-z0-9])(?:no|card)\.?\s*#?\s*(\d{1,4}[a-z]?)(?![a-z0-9])(?!\s*\/)/
 // 87/125, #/199, /99 (después de quitar las temporadas)
 const PRINT_RUN_PATTERN = /(?:^|[^\d])(?:\d{1,4})?\s*\/\s*(\d{1,5})(?!\d)/
 const AUTO_PATTERN = / (auto|autos|autograph|autographed|signed|signature|signatures|rpa) /
@@ -108,7 +110,7 @@ export const createParser = ({ players, rules }) => {
     const year = seasons[0] ? Number(seasons[0][1]) : null
     const withoutSeasons = lower.replace(SEASON_PATTERN, ' ')
 
-    const number = (withoutSeasons.match(NUMBER_PATTERN) || withoutSeasons.match(CODE_PATTERN) || withoutSeasons.match(UPDATE_NUMBER_PATTERN))?.[1]?.toUpperCase() || null
+    const number = (withoutSeasons.match(NUMBER_PATTERN) || withoutSeasons.match(CODE_PATTERN) || withoutSeasons.match(UPDATE_NUMBER_PATTERN) || withoutSeasons.match(WORD_NUMBER_PATTERN))?.[1]?.toUpperCase() || null
     const printRun = Number(withoutSeasons.replace(GRADE_PATTERN, ' ').match(PRINT_RUN_PATTERN)?.[1]) || null
 
     const set = setAliases.find(e => text.includes(e.alias))?.name || null
