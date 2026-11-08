@@ -23,8 +23,9 @@ publica el resultado en la rama `gh-pages` (GitHub Pages). El formato de los arc
 
 1. Secreto del repositorio `THECARDAPI_KEY` (Settings > Secrets and variables > Actions).
 2. Variable del repositorio `LOOKBACK_DAYS`: días hacia atrás del plan de TheCardAPI (gratis: 3, Starter: 14).
-3. Variable del repositorio `MIN_PRICE` (opcional): precio mínimo en USD de las ventas que se piden. El béisbol
-   tiene muchas más ventas que el baloncesto; si un día no cabe en las filas diarias del plan, el log lo avisa.
+3. No hace falta precio mínimo: cada día se cuentan sus ventas y se elige el precio mínimo más bajo con el que caben
+   en las filas que quedan del plan (todas; si no, desde 1 USD, 2 USD...). El que se usó en cada día queda en
+   `index.json` (`minPrice`). La variable `MIN_PRICE` (opcional) solo sube el mínimo desde el que se prueba.
 4. Settings > Pages: rama `gh-pages`, carpeta `/` (después de la primera ejecución).
 
 Si la clave es la misma que la de `basketball-prices`, las filas diarias del plan se reparten entre los dos.
@@ -36,9 +37,8 @@ retraso.
 ## Probar en local
 
 ```
-# Cuántas filas gasta un día (una fila por búsqueda)
+# Cuántas ventas tiene un día con varios precios mínimos (cada recuento gasta una fila por búsqueda)
 THECARDAPI_KEY=... node build.mjs --estimate
-THECARDAPI_KEY=... MIN_PRICE=5 node build.mjs --estimate
 
 THECARDAPI_KEY=... LOOKBACK_DAYS=1 node build.mjs public
 ```

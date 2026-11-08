@@ -33,7 +33,8 @@ jobs:
       THECARDAPI_KEY: ${{ secrets.THECARDAPI_KEY }}
       # Días hacia atrás que permite el plan de TheCardAPI (gratis: 3, Starter: 14). Variable del repositorio
       LOOKBACK_DAYS: ${{ vars.LOOKBACK_DAYS || '3' }}
-      # Precio mínimo (USD) de las ventas que se piden, para gastar menos filas del plan. Variable del repositorio
+      # Opcional: precio mínimo (USD) desde el que se prueba. Sin la variable, cada día se elige solo el más bajo
+      # que cabe en las filas del plan (build.mjs, PRICE_FLOORS)
       MIN_PRICE: ${{ vars.MIN_PRICE || '' }}
       FORCE: ${{ inputs.force && '1' || '' }}
     steps:

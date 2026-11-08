@@ -6,8 +6,8 @@
 //   THECARDAPI_KEY=... node build.mjs --estimate [YYYY-MM-DD]
 //
 // Es el mismo proceso que basketball-prices. Diferencias: se descartan las ventas que la API marca como de
-// otro deporte, se puede poner un precio mínimo (MIN_PRICE) para gastar menos filas del plan y, antes de
-// procesar un día, se cuenta cuántas filas tiene para no empezarlo si no caben en lo que queda del plan.
+// otro deporte y, antes de procesar un día, se cuentan sus filas y se elige el precio mínimo más bajo con el
+// que cabe en lo que queda del plan (PRICE_FLOORS), para no empezarlo si no cabe.
 //
 // Las ventas se buscan por nombre de jugador (data/players.json) y sus títulos se leen con cardParser.js, el
 // mismo archivo que usa la app para leer el texto de la foto, así que las claves coinciden.
@@ -42,9 +42,12 @@ const SUMMARY_DAYS = 30
 // Nombres por búsqueda: la API acepta "(nombre, nombre, ...)" como O. Con 700 aún responde, se deja margen
 const NAMES_PER_QUERY = 600
 const PAGE_LIMIT = 1000
-// Ventas de menos de este precio (USD) no se piden: el béisbol tiene muchas ventas de cartas baratas y el plan
-// limita las filas por día. Variable del repositorio MIN_PRICE (vacía: todas)
+// Precio mínimo (USD) de las ventas que se piden: se elige cada día el más bajo con el que el día cabe en lo que
+// queda del plan (primero todas las ventas; si no caben, de 1 USD o más; si tampoco, de 2...). Así se aprovechan
+// todas las filas del plan y entran las cartas baratas siempre que se pueda. MIN_PRICE (variable del repositorio,
+// opcional) es el mínimo desde el que se empieza a probar
 const MIN_PRICE = Number(process.env.MIN_PRICE) || 0
+const PRICE_FLOORS = [0, 1, 2, 3, 5, 8, 12, 20, 40].filter(floor => floor >= MIN_PRICE)
 const SPORT = 'Baseball'
 
 const DAY_MS = 24 * 3600 * 1000
@@ -91,33 +94,33 @@ const request = async (params) => {
   }
 }
 
-const queryParams = (query, date) => ({
+const queryParams = (query, date, minPrice) => ({
   q: query,
   category: 'sports',
   date_from: date,
   date_to: date,
-  ...(MIN_PRICE ? { price_min: MIN_PRICE } : {}),
+  ...(minPrice ? { price_min: minPrice } : {}),
 })
 
-// Filas que tiene un día (una fila del plan por búsqueda)
-const countDay = async (date, queries) => {
+// Filas que tiene un día con ese precio mínimo (una fila del plan por búsqueda)
+const countDay = async (date, queries, minPrice) => {
   let total = 0
   for (const query of queries) {
-    const page = await request({ ...queryParams(query, date), limit: 1 })
+    const page = await request({ ...queryParams(query, date, minPrice), limit: 1 })
     total += page.pagination?.total || 0
     await sleep(250)
   }
   return total
 }
 
-// Todas las ventas de un día de los jugadores de la lista
-const fetchDay = async (date, queries) => {
+// Todas las ventas de un día de los jugadores de la lista, desde ese precio mínimo
+const fetchDay = async (date, queries, minPrice) => {
   const sales = new Map()
 
   for (const query of queries) {
     let cursor = null
     do {
-      const params = { ...queryParams(query, date), limit: PAGE_LIMIT }
+      const params = { ...queryParams(query, date, minPrice), limit: PAGE_LIMIT }
       if(cursor) params.cursor = cursor
       const page = await request(params)
       for (const sale of page.data || []) sales.set(sale.id, sale)
@@ -269,9 +272,11 @@ const mergeDay = (files, date, cards, playerNames) => {
   }
 }
 
+// Ventas del día con varios precios mínimos (cada uno gasta una fila por búsqueda)
 const estimate = async (date, queries) => {
-  const total = await countDay(date, queries)
-  console.log(`${date}: ${total} ventas${MIN_PRICE ? ` de ${MIN_PRICE} USD o más` : ''} en ${queries.length} búsquedas`)
+  for (const floor of PRICE_FLOORS.slice(0, 5)) {
+    console.log(`${date}: ${await countDay(date, queries, floor)} ventas de ${floor} USD o más`)
+  }
   console.log(`Plan: ${rowsLimit} filas al día, quedan ${rowsRemaining} hoy`)
 }
 
@@ -307,17 +312,24 @@ const main = async () => {
 
   for (const date of pending) {
     let sales
+    let minPrice = null
     try {
-      // Un día que no cabe en lo que queda del plan no se empieza (quedaría a medias)
-      const total = await countDay(date, queries)
-      if(total + queries.length > rowsRemaining){
-        const reason = total > rowsLimit
-          ? `el día tiene ${total} ventas y el plan da ${rowsLimit} filas al día: sube MIN_PRICE o el plan`
-          : `necesita ${total} filas y quedan ${rowsRemaining} hoy: se procesará en la siguiente ejecución`
-        console.log(`::warning::${date}: ${reason}`)
+      // El precio mínimo más bajo con el que el día cabe en lo que queda del plan (un día a medias no se guarda).
+      // Se deja margen para la página extra de las búsquedas con más de PAGE_LIMIT ventas
+      for (const floor of PRICE_FLOORS) {
+        // Sin cuota para contar y descargar algo útil, no se gasta más en recuentos
+        if(rowsRemaining < queries.length * 4) break
+        const total = await countDay(date, queries, floor)
+        if(total + queries.length * 2 <= rowsRemaining){
+          minPrice = floor
+          break
+        }
+      }
+      if(minPrice === null){
+        console.log(`::warning::${date}: no cabe en las ${rowsRemaining} filas que quedan hoy: se procesará en la siguiente ejecución`)
         break
       }
-      sales = await fetchDay(date, queries)
+      sales = await fetchDay(date, queries, minPrice)
     } catch (e) {
       // Un día a medias no se guarda: se vuelve a intentar entero en la siguiente ejecución
       console.log(`::warning::${date}: ${e.message}`)
@@ -342,9 +354,11 @@ const main = async () => {
 
     mergeDay(files, date, cards, playerNames)
     index.days[date] = 'final'
+    // Precio mínimo con el que se procesó cada día
+    ;(index.minPrice ||= {})[date] = minPrice
     processed++
-    console.log(`${date}: ${sales.length} ventas, ${cards.length} reconocidas (quedan ${rowsRemaining} filas hoy)`)
-    console.log(`::notice::${date}: ${sales.length} ventas, ${cards.length} reconocidas. Deporte: ${Object.entries(sports).sort((a, b) => b[1] - a[1]).map(([sport, count]) => `${sport} ${count}`).join(', ')}`)
+    console.log(`${date}: ${sales.length} ventas desde ${minPrice} USD, ${cards.length} reconocidas (quedan ${rowsRemaining} filas hoy)`)
+    console.log(`::notice::${date}: ${sales.length} ventas desde ${minPrice} USD, ${cards.length} reconocidas. Deporte: ${Object.entries(sports).sort((a, b) => b[1] - a[1]).map(([sport, count]) => `${sport} ${count}`).join(', ')}`)
   }
 
   // Sin días nuevos no hace falta publicar, salvo que falte algún archivo (uno nuevo del feed, como trends.json)
@@ -383,7 +397,10 @@ const main = async () => {
   }
 
   for (const date of Object.keys(index.days)) {
-    if(toDayNumber(date) <= today - HISTORY_DAYS) delete index.days[date]
+    if(toDayNumber(date) <= today - HISTORY_DAYS){
+      delete index.days[date]
+      if(index.minPrice) delete index.minPrice[date]
+    }
   }
   index.updated = new Date().toISOString()
   index.epoch = EPOCH
