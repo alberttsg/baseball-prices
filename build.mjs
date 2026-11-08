@@ -48,6 +48,8 @@ const PAGE_LIMIT = 1000
 // opcional) es el mínimo desde el que se empieza a probar
 const MIN_PRICE = Number(process.env.MIN_PRICE) || 0
 const PRICE_FLOORS = [0, 1, 2, 3, 5, 8, 12, 20, 40].filter(floor => floor >= MIN_PRICE)
+// Precio mínimo de los días procesados antes de guardarlo en index.json (MIN_PRICE fijo de entonces)
+const LEGACY_MIN_PRICE = 8
 const SPORT = 'Baseball'
 
 const DAY_MS = 24 * 3600 * 1000
@@ -300,10 +302,13 @@ const main = async () => {
   // diarias del plan y no se puede pagar dos veces (en basketball-prices ayer se procesa como 'partial' y se
   // repite al día siguiente). Del más reciente al más antiguo: el más antiguo está en el límite del plan
   // (date_from se recorta a lo que permite) y solo se usa para recuperar un día que no se pudo hacer
+  // También se repiten los ya hechos con un precio mínimo más alto del más bajo posible: entran las ventas más
+  // baratas si ahora caben (los días hechos antes del precio mínimo automático no lo tienen guardado: 8 USD)
+  const previousFloor = (date) => index.days[date] !== 'final' ? Infinity : (index.minPrice?.[date] ?? LEGACY_MIN_PRICE)
   const pending = []
   for (let day = today - 2; day >= today - LOOKBACK_DAYS; day--) {
     const date = toDate(day)
-    if(FORCE || index.days[date] !== 'final') pending.push(date)
+    if(FORCE || previousFloor(date) > PRICE_FLOORS[0]) pending.push(date)
   }
 
   const files = await loadPlayerFiles(out)
@@ -313,10 +318,13 @@ const main = async () => {
   for (const date of pending) {
     let sales
     let minPrice = null
+    const done = index.days[date] === 'final'
+    // Uno ya hecho solo se repite con un precio mínimo más bajo que el que tiene
+    const floors = PRICE_FLOORS.filter(floor => FORCE || floor < previousFloor(date))
     try {
       // El precio mínimo más bajo con el que el día cabe en lo que queda del plan (un día a medias no se guarda).
       // Se deja margen para la página extra de las búsquedas con más de PAGE_LIMIT ventas
-      for (const floor of PRICE_FLOORS) {
+      for (const floor of floors) {
         // Sin cuota para contar y descargar algo útil, no se gasta más en recuentos
         if(rowsRemaining < queries.length * 4) break
         const total = await countDay(date, queries, floor)
@@ -326,6 +334,11 @@ const main = async () => {
         }
       }
       if(minPrice === null){
+        // Uno ya hecho se queda como está (se intentará mejorar en otra ejecución); uno pendiente, en la siguiente
+        if(done){
+          console.log(`${date}: sigue con ${previousFloor(date)} USD (no cabe uno más bajo en las ${rowsRemaining} filas que quedan)`)
+          continue
+        }
         console.log(`::warning::${date}: no cabe en las ${rowsRemaining} filas que quedan hoy: se procesará en la siguiente ejecución`)
         break
       }
