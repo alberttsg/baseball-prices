@@ -92,11 +92,18 @@ const request = async (params) => {
   for (let attempt = 1; ; attempt++) {
     const res = await fetch(url, { headers: { 'x-market-api-key': API_KEY } })
     const remaining = res.headers.get('x-ratelimit-remaining')
-    if(remaining !== null) rowsRemaining = Number(remaining)
     const limit = res.headers.get('x-ratelimit-limit')
     if(limit !== null) rowsLimit = Number(limit)
 
-    if(res.ok) return res.json()
+    if(res.ok){
+      const body = await res.json()
+      // El contador de la API va con retraso (descuenta las filas un rato después): se lleva también la cuenta
+      // propia (una fila por venta devuelta, mínimo una por búsqueda) y vale la más baja
+      const charged = Math.max(1, body.data?.length || 0)
+      rowsRemaining = Math.min(rowsRemaining - charged, remaining !== null ? Number(remaining) : Infinity)
+      return body
+    }
+    if(remaining !== null) rowsRemaining = Number(remaining)
     if(res.status === 429 && rowsRemaining === 0) throw new BudgetError('Sin filas disponibles hoy')
     if(attempt >= 4 || (res.status < 500 && res.status !== 429)) throw new Error(`${res.status} ${await res.text()}`)
     await sleep(2000 * attempt)
