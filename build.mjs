@@ -281,30 +281,69 @@ const mergeDay = (files, date, cards, playerNames) => {
   }
 }
 
-// Lo que se guarda de cada venta en raw/ (lo que necesita readSales)
-const rawSale = (sale) => ({
+// Cambio del día (unidades de cada moneda por 1 USD) para pasar a dólares las ventas en otra moneda: desde
+// agosto de 2026 la API da el precio en la moneda del anuncio (GBP, EUR, CAD...). Frankfurter (BCE, sin clave);
+// si no responde, unos cambios aproximados
+const FALLBACK_RATES = { EUR: 0.92, GBP: 0.78, CAD: 1.38, AUD: 1.52, JPY: 150, CHF: 0.88, NZD: 1.68, SEK: 10.5, DKK: 6.9, NOK: 10.8, PLN: 4, MXN: 18.5, HKD: 7.8, SGD: 1.34, CNY: 7.2 }
+const loadRates = async () => {
+  try {
+    const res = await fetch('https://api.frankfurter.app/latest?from=USD')
+    const { rates } = await res.json()
+    if(rates?.EUR) return rates
+  } catch (e) {}
+  console.log('::warning::Sin cambio de moneda del día: se usan los aproximados')
+  return FALLBACK_RATES
+}
+
+const toUsd = (price, currency, rates) => {
+  if(price == null || !(price > 0)) return null
+  const code = (currency || 'USD').toUpperCase()
+  if(code === 'USD') return price
+  return rates[code] ? Math.round(price / rates[code] * 100) / 100 : null
+}
+
+// Lo que se guarda de cada venta en raw/ (lo que necesita readSales). price en USD; currency la original.
+// set, number y year: los que da la API (se usan si el título no los dice)
+const rawSale = (sale, rates) => ({
   title: sale.title,
-  price: sale.price_usd ?? (sale.currency === 'USD' ? sale.price : null),
-  grader: sale.grader || null,
+  price: sale.price_usd ?? toUsd(sale.price, sale.currency, rates),
+  currency: sale.currency || null,
+  priceMissing: sale.price == null,
+  grader: sale.grader || sale.grading_company || null,
   grade: sale.grade || null,
   sport: sale.sport || null,
+  set: sale.card_set || null,
+  number: sale.card_number || null,
+  year: sale.year || null,
   image: sale.thumbnail_url || null,
 })
+
+// Número de la API (#27, BCP-100...) en el formato del parser
+const apiNumber = (value) => {
+  const number = String(value || '').replace(/^#\s*/, '').trim().toUpperCase()
+  return /^[A-Z0-9]{1,6}(?:-[A-Z0-9]{1,6})?$/.test(number) ? number : null
+}
 
 const REJECT_SAMPLES = 15
 
 // Cartas reconocidas en las ventas (en formato rawSale) y por qué se descartan las demás (para el log)
-const readSales = (sales, parse, excluded) => {
+const readSales = (sales, { parse, findSet }, excluded) => {
   const cards = []
   const sports = {}
-  const rejected = { otherSport: 0, noPrice: 0, excluded: {}, noPlayer: [], noSetOrNumber: [] }
+  const rejected = { otherSport: 0, noPrice: 0, noPriceReasons: {}, excluded: {}, noPlayer: [], noSetOrNumber: [] }
   let excludedCount = 0
   for (const sale of sales) {
     const sport = sale.sport || '(vacío)'
     sports[sport] = (sports[sport] || 0) + 1
     // Mismo nombre que un jugador de otro deporte (la búsqueda es por nombre)
     if(sale.sport && sale.sport !== SPORT){ rejected.otherSport++; continue }
-    if(!sale.price || sale.price <= 0){ rejected.noPrice++; continue }
+    if(!sale.price || sale.price <= 0){
+      rejected.noPrice++
+      // Por qué: precio no publicado (ofertas aceptadas) o moneda sin cambio
+      const reason = sale.priceMissing ? 'sin publicar' : (sale.currency || '?')
+      rejected.noPriceReasons[reason] = (rejected.noPriceReasons[reason] || 0) + 1
+      continue
+    }
     const card = parse(sale.title, { grader: sale.grader, grade: sale.grade })
     if(!card){
       const text = normalizeText(sale.title)
@@ -315,6 +354,10 @@ const readSales = (sales, parse, excluded) => {
       } else rejected.noPlayer.push(sale.title)
       continue
     }
+    // Lo que el título no dice, de los datos de la API
+    if(!card.number && sale.number) card.number = apiNumber(sale.number)
+    if(!card.set && sale.set) card.set = findSet(sale.set)
+    if(!card.year && Number(sale.year) >= 1880) card.year = Number(sale.year)
     if(!card.set && !card.number){ rejected.noSetOrNumber.push(sale.title); continue }
     cards.push({ ...card, price: cents(sale.price), image: sale.image })
   }
@@ -323,10 +366,11 @@ const readSales = (sales, parse, excluded) => {
 }
 
 // Resumen de los descartes de un día, con ejemplos (anotación ::notice:: del log, se ve en la ejecución)
-const rejectedNotice = (date, { otherSport, noPrice, excluded, excludedCount, noPlayer, noSetOrNumber }) => {
+const rejectedNotice = (date, { otherSport, noPrice, noPriceReasons, excluded, excludedCount, noPlayer, noSetOrNumber }) => {
+  const priceReasons = Object.entries(noPriceReasons || {}).sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r} ${n}`).join(', ')
   const sample = (titles) => titles.slice(0, REJECT_SAMPLES).map(t => String(t).slice(0, 90).replace(/%/g, '%25').replace(/[\r\n]+/g, ' ')).join(' ¦ ')
   const words = Object.entries(excluded).sort((a, b) => b[1] - a[1]).slice(0, 25).map(([w, n]) => `${w} ${n}`).join(', ')
-  return `::notice::${date} descartadas: otro deporte ${otherSport}, sin precio ${noPrice}, palabra excluida ${excludedCount} (${words})` +
+  return `::notice::${date} descartadas: otro deporte ${otherSport}, sin precio ${noPrice} (${priceReasons}), palabra excluida ${excludedCount} (${words})` +
     ` %0A· sin jugador ${noPlayer.length}: ${sample(noPlayer)}` +
     ` %0A· sin set ni número ${noSetOrNumber.length}: ${sample(noSetOrNumber)}`
 }
@@ -348,12 +392,14 @@ const main = async () => {
   const rules = await readJson('data/rules.json')
 
   if(out === '--estimate') return estimate(process.argv[3] || toDate(todayNumber() - 1), buildQueries(players, rules))
-  const { parse } = createParser({ players, rules })
+  const parser = createParser({ players, rules })
   const excluded = rules.excluded.map(word => normalizeText(word))
   // Versión del parser y sus listas: si cambia, se vuelven a leer los días guardados en raw/
   const parserVersion = createHash('sha1').update(await readFile('cardParser.js')).update(JSON.stringify(rules)).update(JSON.stringify(players)).digest('hex').slice(0, 12)
   // Días leídos en esta ejecución (no hace falta volver a leerlos)
   const readNow = new Set()
+  // Cambio de moneda del día (se pide solo si hay ventas nuevas)
+  let rates = null
   const playerNames = new Map(players.map(([name, slug]) => [slug, name]))
 
   const index = (await readJson(`${out}/index.json`)) || { days: {} }
@@ -412,11 +458,12 @@ const main = async () => {
       continue
     }
 
-    const raw = sales.map(rawSale)
+    rates ||= await loadRates()
+    const raw = sales.map(sale => rawSale(sale, rates))
     await mkdir(RAW_DIR, { recursive: true })
     await writeFile(`${RAW_DIR}/${date}.json`, JSON.stringify(raw))
     // sports: deporte que pone la API en las ventas (en el log, para ver si se puede filtrar solo por él)
-    const { cards, sports, rejected } = readSales(raw, parse, excluded)
+    const { cards, sports, rejected } = readSales(raw, parser, excluded)
     readNow.add(date)
 
     mergeDay(files, date, cards, playerNames)
@@ -442,7 +489,7 @@ const main = async () => {
       if(readNow.has(date) || index.days[date] !== 'final') continue
       const raw = await readJson(`${RAW_DIR}/${name}`)
       if(!raw) continue
-      const { cards } = readSales(raw, parse, excluded)
+      const { cards } = readSales(raw, parser, excluded)
       mergeDay(files, date, cards, playerNames)
       reread++
       console.log(`${date}: releído con el parser nuevo, ${raw.length} ventas, ${cards.length} reconocidas`)

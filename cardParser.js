@@ -150,7 +150,13 @@ export const createParser = ({ players, rules }) => {
     }
   }
 
-  return { parse, findPlayer }
+  // Set de un texto que solo es el nombre del set (el card_set de las ventas de la API)
+  const findSet = (text) => {
+    const normalized = normalizeText(text)
+    return setAliases.find(e => normalized.includes(e.alias))?.name || null
+  }
+
+  return { parse, findPlayer, findSet }
 }
 
 // Clave de la variante (sin el grado): las ventas con la misma clave se agrupan. El parallel va con las
