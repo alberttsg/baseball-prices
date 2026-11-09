@@ -412,11 +412,13 @@ const main = async () => {
   // (date_from se recorta a lo que permite) y solo se usa para recuperar un día que no se pudo hacer
   // También se repiten los ya hechos con un precio mínimo más alto del más bajo posible: entran las ventas más
   // baratas si ahora caben (los días hechos antes del precio mínimo automático no lo tienen guardado: 8 USD)
+  // Y los hechos antes de pasar a USD las ventas en otra moneda (index.usd), con el mismo precio mínimo o uno más bajo
   const previousFloor = (date) => index.days[date] !== 'final' ? Infinity : (index.minPrice?.[date] ?? LEGACY_MIN_PRICE)
+  const withoutUsd = (date) => index.days[date] === 'final' && !index.usd?.[date]
   const pending = []
   for (let day = today - 2; day >= today - LOOKBACK_DAYS; day--) {
     const date = toDate(day)
-    if(FORCE || previousFloor(date) > PRICE_FLOORS[0]) pending.push(date)
+    if(FORCE || previousFloor(date) > PRICE_FLOORS[0] || withoutUsd(date)) pending.push(date)
   }
 
   const files = await loadPlayerFiles(out)
@@ -428,7 +430,7 @@ const main = async () => {
     let minPrice = null
     const done = index.days[date] === 'final'
     // Uno ya hecho solo se repite con un precio mínimo más bajo que el que tiene
-    const floors = PRICE_FLOORS.filter(floor => FORCE || floor < previousFloor(date))
+    const floors = PRICE_FLOORS.filter(floor => FORCE || floor < previousFloor(date) || (withoutUsd(date) && floor <= previousFloor(date)))
     try {
       // El precio mínimo más bajo con el que el día cabe en lo que queda del plan (un día a medias no se guarda).
       // Se deja margen para la página extra de las búsquedas con más de PAGE_LIMIT ventas
@@ -470,6 +472,8 @@ const main = async () => {
     index.days[date] = 'final'
     // Precio mínimo con el que se procesó cada día
     ;(index.minPrice ||= {})[date] = minPrice
+    // Ya con las ventas en otra moneda pasadas a USD
+    ;(index.usd ||= {})[date] = true
     processed++
     console.log(`${date}: ${sales.length} ventas desde ${minPrice} USD, ${cards.length} reconocidas (quedan ${rowsRemaining} filas hoy)`)
     console.log(`::notice::${date}: ${sales.length} ventas desde ${minPrice} USD, ${cards.length} reconocidas. Deporte: ${Object.entries(sports).sort((a, b) => b[1] - a[1]).map(([sport, count]) => `${sport} ${count}`).join(', ')}`)
@@ -543,6 +547,7 @@ const main = async () => {
     if(toDayNumber(date) <= today - HISTORY_DAYS){
       delete index.days[date]
       if(index.minPrice) delete index.minPrice[date]
+      if(index.usd) delete index.usd[date]
     }
   }
   index.updated = new Date().toISOString()
