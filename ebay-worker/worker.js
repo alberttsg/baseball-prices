@@ -22,7 +22,7 @@ const GRADED = /\b(psa|bgs|beckett|sgc|cgc|csg|hga|tag|dsg|isa|ksa|gma|mnt|ags)\
 
 // Otra colección o una versión especial de la carta, que valen otra cosa: fuera si la búsqueda no las pide
 // ("2022 Topps #84" no es "2022 Topps Heritage #84" ni la Refractor ni una numerada /875)
-const OTHER_PRODUCTS = ['heritage', 'chrome', 'archives', 'finest', 'bowman', 'stadium club', 'gypsy queen', 'allen ginter', 'allen & ginter', 'inception', 'platinum', 'opening day', 'big league', 'gallery', 'tribute', 'museum', 'sterling', 'dynasty', 'pristine', 'fire', 'holiday', 'topps now', 'update', 'mini', 'sticker', 'national baseball card day', 'mega box', 'living set']
+const OTHER_PRODUCTS = ['heritage', 'chrome', 'archives', 'finest', 'bowman', 'stadium club', 'gypsy queen', 'allen ginter', 'allen & ginter', 'inception', 'platinum', 'opening day', 'big league', 'gallery', 'tribute', 'museum', 'sterling', 'dynasty', 'pristine', 'fire', 'holiday', 'topps now', 'update', 'mini', 'sticker', 'national baseball card day', 'mega box', 'living set', 'all star game', 'all-star game']
 const SPECIAL_VERSIONS = ['refractor', 'foilboard', 'foil', 'rainbow', 'sparkle', 'parallel', 'variation', 'ssp', 'sp', 'short print', 'prizm', 'mojo', 'wave', 'shimmer', 'holo', 'auto', 'autograph', 'patch', 'relic', 'jersey card', 'printing plate', '1/1']
 const SERIAL = /(?:^|\s|#)\/\s*\d{1,4}\b|\b\d{1,4}\s*\/\s*\d{1,4}\b/
 

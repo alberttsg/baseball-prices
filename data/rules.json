@@ -62,6 +62,7 @@
     { "name": "Topps Gilded Collection", "aliases": ["gilded collection", "topps gilded"] },
     { "name": "Topps Brooklyn Collection", "aliases": ["brooklyn collection"] },
     { "name": "Topps Throwback Thursday", "aliases": ["throwback thursday"] },
+    { "name": "Topps All-Star Game", "aliases": ["topps all star game", "all star game", "all star game box"] },
     { "name": "Topps Chrome Ben Baller", "aliases": ["ben baller"] },
     { "name": "Topps Archives Snapshots", "aliases": ["archives snapshots"] },
     { "name": "Upper Deck Goodwin Champions", "aliases": ["goodwin champions"] },
