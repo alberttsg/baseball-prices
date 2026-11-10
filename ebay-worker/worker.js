@@ -17,8 +17,14 @@ const CACHE_SECONDS = 24 * 3600
 const MAX_ITEMS = 10
 
 // Anuncios que no son una carta suelta de verdad
-const EXCLUDED = /\b(lot|lots|you pick|pick your|choose|complete set|team set|reprint|custom|proxy|digital|box|pack|break|random)\b/i
-const GRADED = /\b(psa|bgs|beckett|sgc|cgc|csg|hga|tag)\s*(gem\s*(mint|mt)\s*)?\d/i
+const EXCLUDED = /\b(lot|lots|you pick|pick your|choose|complete set|team set|reprint|rp|facsimile|custom|proxy|digital|box|pack|break|random)\b/i
+const GRADED = /\b(psa|bgs|beckett|sgc|cgc|csg|hga|tag|dsg|isa|ksa|gma|mnt|ags)\s*(gem\s*(mint|mt)\s*)?\d/i
+
+// Otra colección o una versión especial de la carta, que valen otra cosa: fuera si la búsqueda no las pide
+// ("2022 Topps #84" no es "2022 Topps Heritage #84" ni la Refractor ni una numerada /875)
+const OTHER_PRODUCTS = ['heritage', 'chrome', 'archives', 'finest', 'bowman', 'stadium club', 'gypsy queen', 'allen ginter', 'allen & ginter', 'inception', 'platinum', 'opening day', 'big league', 'gallery', 'tribute', 'museum', 'sterling', 'dynasty', 'pristine', 'fire', 'holiday', 'topps now', 'update', 'mini', 'sticker', 'national baseball card day', 'mega box', 'living set']
+const SPECIAL_VERSIONS = ['refractor', 'foilboard', 'foil', 'rainbow', 'sparkle', 'parallel', 'variation', 'ssp', 'sp', 'short print', 'prizm', 'mojo', 'wave', 'shimmer', 'holo', 'auto', 'autograph', 'patch', 'relic', 'jersey card', 'printing plate', '1/1']
+const SERIAL = /(?:^|\s|#)\/\s*\d{1,4}\b|\b\d{1,4}\s*\/\s*\d{1,4}\b/
 
 // Token de aplicación (dura 2 horas): se reutiliza mientras el Worker siga vivo
 let token = null
@@ -59,8 +65,15 @@ const words = (text) => text.toLowerCase().normalize('NFD').replace(/[\u0300-\u0
 
 // ¿El anuncio es esta carta? Mismo jugador (todas sus palabras), mismo año (el primero del título: "2024 Topps
 // ... 2023 Greatest Hits" es de 2024) y mismo número (#27, No. 27 o 27 suelto; no "GH-27" ni "27/99")
-const matches = (title, { player, year, number }) => {
+const hasPhrase = (text, phrase) => new RegExp(`(?:^|[^a-z0-9])${escape(phrase)}(?![a-z0-9])`).test(text)
+
+const matches = (title, { player, year, number, q }) => {
   const titleWords = new Set(words(title))
+  const lowerTitle = title.toLowerCase()
+  const lowerQ = q.toLowerCase()
+  const unwanted = [...OTHER_PRODUCTS, ...SPECIAL_VERSIONS].find(phrase => hasPhrase(lowerTitle, phrase) && !hasPhrase(lowerQ, phrase))
+  if(unwanted) return false
+  if(SERIAL.test(title) && !SERIAL.test(q)) return false
   if(player && !words(player).every(word => titleWords.has(word))) return false
   if(year){
     const firstYear = title.match(/\b(19[0-9]{2}|20[0-9]{2})(?:-\d{2})?\b/)
@@ -91,7 +104,7 @@ const search = async (env, q, grade, wanted) => {
   const items = (data.itemSummaries || [])
     .filter(item => item.price?.currency === 'USD' && Number(item.price.value) > 0)
     .filter(item => !EXCLUDED.test(item.title))
-    .filter(item => matches(item.title, wanted))
+    .filter(item => matches(item.title, { ...wanted, q }))
     // Sin gradear: fuera las gradeadas (valen otra cosa); gradeada: solo las de ese grado
     .filter(item => wantsGraded ? item.title.toLowerCase().includes(grade.toLowerCase()) : !GRADED.test(item.title))
     .map(item => ({ title: item.title, price: Number(item.price.value), url: item.itemWebUrl, image: item.image?.imageUrl || item.thumbnailImages?.[0]?.imageUrl || null }))
