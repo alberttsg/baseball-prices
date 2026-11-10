@@ -1,19 +1,23 @@
 // Precios de anuncios activos de eBay para las cartas sin ventas recientes en el feed (Cloudflare Worker).
 // La app no puede llevar la clave de eBay: este Worker la guarda (secretos EBAY_CLIENT_ID y EBAY_CLIENT_SECRET),
 // busca en la Browse API de eBay (anuncios de "cómpralo ya" en EE. UU., categoría de cartas sueltas) y devuelve
-// la mediana de los precios. Cada búsqueda se guarda un día en la caché de Cloudflare.
+// la mediana de los precios. Cada búsqueda se guarda 6 horas en la caché de Cloudflare.
 //
 //   GET /listings?q=2023 Topps Aaron Judge 27&grade=Raw&player=Aaron Judge&year=2023&number=27
 //   (grade: Raw, PSA 10, BGS 9.5...; player/year/number opcionales: los anuncios tienen que coincidir)
 //   -> { count, price, low, high, items: [{ title, price, url, image }] }   (precios en USD; price: mediana)
 //
 // eBay ya no da gratis las ventas cerradas (la API de vendidos es solo para socios): son precios pedidos.
+//
+// Secretos del Worker (Settings > Variables and Secrets): EBAY_CLIENT_ID, EBAY_CLIENT_SECRET y APP_KEY (la misma
+// clave que lleva la app en Components/Prices/ebayWorker.js; sin APP_KEY no se comprueba)
 
 const TOKEN_URL = 'https://api.ebay.com/identity/v1/oauth2/token'
 const SEARCH_URL = 'https://api.ebay.com/buy/browse/v1/item_summary/search'
 // Sports Trading Card Singles
 const CATEGORY_ID = '261328'
-const CACHE_SECONDS = 24 * 3600
+// La licencia de la API de eBay (8.1.c): lo que se muestra de un anuncio no puede tener más de 6 horas
+const CACHE_SECONDS = 6 * 3600
 const MAX_ITEMS = 10
 
 // Anuncios que no son una carta suelta de verdad
@@ -57,7 +61,8 @@ const round = (value) => Math.round(value * 100) / 100
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
   status,
-  headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${CACHE_SECONDS}` },
+  // Solo las respuestas buenas se pueden guardar en caché (no un error de clave o de límite)
+  headers: { 'Content-Type': 'application/json', 'Cache-Control': status === 200 ? `public, max-age=${CACHE_SECONDS}` : 'no-store' },
 })
 
 const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -167,15 +172,41 @@ const handleIdentify = async (request, env) => {
   try {
     return new Response(JSON.stringify(await identify(env, image.replace(/^data:image\/\w+;base64,/, ''))), { headers: { 'Content-Type': 'application/json' } })
   } catch (e) {
+    // El motivo solo en los logs del Worker (Observability), no en la respuesta
     console.log(e.message)
-    // Mientras se prueba: el motivo de eBay (p. ej. sin acceso a la búsqueda por imagen)
-    return new Response(JSON.stringify({ error: 'ebay', detail: e.message.slice(0, 500) }), { status: 502, headers: { 'Content-Type': 'application/json' } })
+    return new Response(JSON.stringify({ error: 'ebay' }), { status: 502, headers: { 'Content-Type': 'application/json' } })
   }
+}
+
+// ---- Protección: el límite de eBay (llamadas al día) es para todos los usuarios ----
+// - Clave de la app: si existe el secreto APP_KEY, cada petición tiene que traerla en la cabecera X-App-Key (va dentro
+//   de la app, así que no es secreta de verdad, pero evita que cualquiera que vea la URL la use)
+// - Límite por IP: como mucho LIMITS[ruta] peticiones cada LIMIT_WINDOW_MS. Se cuenta en la memoria del Worker (cada
+//   copia del Worker lleva su cuenta): frena a quien abuse, no es exacto
+const LIMIT_WINDOW_MS = 10 * 60 * 1000
+const LIMITS = { '/listings': 150, '/identify': 40 }
+const hits = new Map()
+
+const overLimit = (ip, path) => {
+  const now = Date.now()
+  const key = `${path}|${ip}`
+  const entry = hits.get(key)
+  if(!entry || now - entry.start > LIMIT_WINDOW_MS){
+    hits.set(key, { start: now, count: 1 })
+    // Que la memoria no crezca sin fin
+    if(hits.size > 5000) for (const [k, v] of hits) if(now - v.start > LIMIT_WINDOW_MS) hits.delete(k)
+    return false
+  }
+  return ++entry.count > LIMITS[path]
 }
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url)
+    if(!LIMITS[url.pathname]) return json({ error: 'not found' }, 404)
+    if(env.APP_KEY && request.headers.get('X-App-Key') !== env.APP_KEY) return json({ error: 'key' }, 401)
+    if(overLimit(request.headers.get('CF-Connecting-IP') || 'unknown', url.pathname)) return new Response(JSON.stringify({ error: 'limit' }), { status: 429, headers: { 'Content-Type': 'application/json' } })
+
     if(url.pathname === '/identify') return handleIdentify(request, env)
     if(url.pathname !== '/listings') return json({ error: 'not found' }, 404)
 
@@ -183,7 +214,7 @@ export default {
     const grade = (url.searchParams.get('grade') || 'Raw').trim().slice(0, 20)
     if(q.length < 3) return json({ error: 'q' }, 400)
 
-    // Caché de un día por búsqueda (la misma carta escaneada por muchos usuarios es una sola llamada a eBay)
+    // Caché de 6 horas por búsqueda (la misma carta escaneada por muchos usuarios es una sola llamada a eBay)
     const wanted = {
       player: (url.searchParams.get('player') || '').trim().slice(0, 60),
       year: (url.searchParams.get('year') || '').trim().slice(0, 4),
