@@ -125,9 +125,58 @@ const search = async (env, q, grade, wanted) => {
   }
 }
 
+// ---- Identificar la carta por la foto (búsqueda por imagen de eBay, experimental) ----
+//   POST /identify   body: { image: base64 (JPEG, mejor pequeña: ~600 px) }
+//   -> { items: [{ title, price, url, image }] }   los anuncios que más se parecen, en el orden de eBay
+// De sus títulos se saca el año, el set y el número de la carta (el frontal de las cartas actuales no los lleva)
+const SEARCH_BY_IMAGE_URL = 'https://api.ebay.com/buy/browse/v1/item_summary/search_by_image'
+const MAX_IMAGE_CHARS = 1_500_000
+
+const identify = async (env, image) => {
+  const params = new URLSearchParams({ category_ids: CATEGORY_ID, limit: '20' })
+  const res = await fetch(`${SEARCH_BY_IMAGE_URL}?${params}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${await getToken(env)}`,
+      'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ image }),
+  })
+  if(!res.ok) throw new Error(`search_by_image ${res.status} ${await res.text()}`)
+  const data = await res.json()
+  return {
+    items: (data.itemSummaries || []).map(item => ({
+      title: item.title,
+      price: Number(item.price?.value) || null,
+      url: item.itemWebUrl,
+      image: item.image?.imageUrl || item.thumbnailImages?.[0]?.imageUrl || null,
+    })),
+  }
+}
+
+const handleIdentify = async (request, env) => {
+  if(request.method !== 'POST') return json({ error: 'POST' }, 405)
+  let image
+  try {
+    image = (await request.json()).image
+  } catch (e) {
+    return json({ error: 'body' }, 400)
+  }
+  if(typeof image !== 'string' || image.length < 100 || image.length > MAX_IMAGE_CHARS) return json({ error: 'image' }, 400)
+  try {
+    return new Response(JSON.stringify(await identify(env, image.replace(/^data:image\/\w+;base64,/, ''))), { headers: { 'Content-Type': 'application/json' } })
+  } catch (e) {
+    console.log(e.message)
+    // Mientras se prueba: el motivo de eBay (p. ej. sin acceso a la búsqueda por imagen)
+    return new Response(JSON.stringify({ error: 'ebay', detail: e.message.slice(0, 500) }), { status: 502, headers: { 'Content-Type': 'application/json' } })
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url)
+    if(url.pathname === '/identify') return handleIdentify(request, env)
     if(url.pathname !== '/listings') return json({ error: 'not found' }, 404)
 
     const q = (url.searchParams.get('q') || '').trim().slice(0, 200)
